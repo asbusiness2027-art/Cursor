@@ -8,3 +8,7 @@ whatsapp-send-result.json
 inbox.jsonl
 inbox-latest.json
 replies-stopped
+conversations/
+opening-send.json
+opening-send.done.json
+opening-send-result.json
