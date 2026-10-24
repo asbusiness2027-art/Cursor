@@ -1,0 +1,14 @@
+node_modules/
+auth_info_baileys/
+whatsapp-qr.png
+whatsapp-status.json
+pending-send.json
+pending-send.sending.json
+whatsapp-send-result.json
+inbox.jsonl
+inbox-latest.json
+replies-stopped
+conversations/
+opening-send.json
+opening-send.done.json
+opening-send-result.json
