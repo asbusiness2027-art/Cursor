@@ -1,0 +1,7 @@
+node_modules/
+auth_info_baileys/
+whatsapp-qr.png
+whatsapp-status.json
+pending-send.json
+pending-send.sending.json
+whatsapp-send-result.json
