@@ -5,3 +5,6 @@ whatsapp-status.json
 pending-send.json
 pending-send.sending.json
 whatsapp-send-result.json
+inbox.jsonl
+inbox-latest.json
+replies-stopped

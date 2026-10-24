@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, writeFile } from 'node:fs/promises'
 import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys'
 import QRCode from 'qrcode'
 import Pino from 'pino'
@@ -6,11 +6,12 @@ import Pino from 'pino'
 const AUTH_DIR = 'auth_info_baileys'
 const QR_PATH = 'whatsapp-qr.png'
 const STATUS_PATH = 'whatsapp-status.json'
-const PENDING_PATH = 'pending-send.json'
-const SENDING_PATH = 'pending-send.sending.json'
-const RESULT_PATH = 'whatsapp-send-result.json'
+const INBOX_PATH = 'inbox.jsonl'
+const LATEST_PATH = 'inbox-latest.json'
+const STOP_PATH = 'replies-stopped'
 
 const logger = Pino({ level: 'silent' })
+const seenMessageIds = new Set()
 
 async function writeStatus(status) {
   const body = JSON.stringify({ ...status, at: new Date().toISOString() }, null, 2)
@@ -18,40 +19,68 @@ async function writeStatus(status) {
   console.log(body)
 }
 
-async function sendPending(sock) {
-  try {
-    await rename(PENDING_PATH, SENDING_PATH)
-  } catch {
-    return
-  }
+function messageText(message) {
+  if (!message) return ''
+  return message.conversation
+    || message.extendedTextMessage?.text
+    || message.imageMessage?.caption
+    || message.videoMessage?.caption
+    || ''
+}
 
-  let job
+async function repliesHalted() {
   try {
-    job = JSON.parse(await readFile(SENDING_PATH, 'utf8'))
-    const lookup = await sock.onWhatsApp(String(job.number))
-    const match = Array.isArray(lookup) ? lookup.find((entry) => entry?.exists) : null
-    if (!match?.jid) {
-      await writeFile(RESULT_PATH, JSON.stringify({
-        ok: false,
-        error: 'number_not_on_whatsapp',
-        number: String(job.number),
-      }, null, 2))
-      return
-    }
-    const sent = await sock.sendMessage(match.jid, { text: String(job.text) })
-    await writeFile(RESULT_PATH, JSON.stringify({
-      ok: true,
-      number: String(job.number),
-      jid: match.jid,
-      id: sent?.key?.id ?? null,
-    }, null, 2))
-  } catch (error) {
-    await writeFile(RESULT_PATH, JSON.stringify({
-      ok: false,
-      number: job?.number ?? null,
-      error: String(error),
-    }, null, 2))
+    await access(STOP_PATH)
+    return true
+  } catch {
+    return false
   }
+}
+
+function customerReply(text) {
+  const t = (text || '').trim()
+  if (!t) return 'أهلاً. اكتب طلبك في رسالة نصية واحدة وأرد عليك.'
+  if (/شكر/.test(t)) return 'العفو. لو محتاج حاجة تخص الطلب، اكتبها.'
+  if (/^(السلام|سلام|هاي|هلا|مرحبا|مرحبًا|اهلا|أهلا|صباح|مساء)/.test(t)) {
+    return 'أهلاً بحضرتك. معك المساعد. اكتب طلبك وأساعدك.'
+  }
+  return 'وصلتني رسالتك. اكتب طلبك بوضوح في سطر واحد وأرد عليك.'
+}
+
+function listenForCustomers(sock, startedAt) {
+  sock.ev.on('messages.upsert', async (event) => {
+    if (event.type !== 'notify') return
+    for (const m of event.messages) {
+      if (m.key.fromMe) continue
+      const jid = m.key.remoteJid || ''
+      if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') continue
+      const id = m.key.id || ''
+      if (id && seenMessageIds.has(id)) continue
+      if (id) seenMessageIds.add(id)
+      const timestampMs = Number(m.messageTimestamp || 0) * 1000
+      if (timestampMs && timestampMs < startedAt - 15000) continue
+      const text = messageText(m.message)
+      const halted = await repliesHalted()
+      const reply = halted ? null : customerReply(text)
+      const record = {
+        at: new Date().toISOString(),
+        from: jid,
+        id: id || null,
+        text: text || null,
+        kind: text ? 'text' : 'non-text',
+        status: halted ? 'halted' : 'auto_reply',
+        reply,
+        sent: false,
+      }
+      if (reply) {
+        await sock.sendMessage(jid, { text: reply })
+        record.sent = true
+      }
+      await appendFile(INBOX_PATH, `${JSON.stringify(record)}\n`)
+      await writeFile(LATEST_PATH, JSON.stringify(record, null, 2))
+      console.log(JSON.stringify({ incoming: true, from: jid, status: record.status, sent: record.sent }))
+    }
+  })
 }
 
 async function connectToWhatsApp() {
@@ -59,6 +88,7 @@ async function connectToWhatsApp() {
   const sock = makeWASocket({ auth: state, logger })
 
   sock.ev.on('creds.update', saveCreds)
+  listenForCustomers(sock, Date.now())
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update
@@ -70,8 +100,7 @@ async function connectToWhatsApp() {
     }
 
     if (connection === 'open') {
-      await writeStatus({ state: 'linked', id: sock.user?.id ?? null })
-      await sendPending(sock)
+      await writeStatus({ state: 'linked', mode: 'auto_reply', id: sock.user?.id ?? null })
     }
 
     if (connection === 'close') {
